@@ -1,63 +1,45 @@
-#!/bin/sh
+#!/bin/bash
+exec 2>&1
+set -uem
+export LANG=en_US.UTF-8
 
-set -e
+err=0
 
 if [ -z "$DISTRIBUTION_ID" ]; then
-  echo "DISTRIBUTION_ID is not set. Quitting."
-  exit 1
+  echo "error: DISTRIBUTION_ID is not set"
+  err=1
 fi
 
-if [ -z "$PATH_TO_INVALIDATE" ]; then
-  PATH_TO_INVALIDATE=.
-  echo "PATH_TO_INVALIDATE is not set. Defaulting to ."
+if [ -z "$PATHS" ]; then
+  echo "error: PATHS is not set"
+  err=1
 fi
 
 if [ -z "$AWS_ACCESS_KEY_ID" ]; then
-  echo "AWS_ACCESS_KEY_ID is not set. Quitting."
-  exit 1
+  echo "error: AWS_ACCESS_KEY_ID is not set"
+  err=1
 fi
 
 if [ -z "$AWS_SECRET_ACCESS_KEY" ]; then
-  echo "AWS_SECRET_ACCESS_KEY is not set. Quitting."
+  echo "error: AWS_SECRET_ACCESS_KEY is not set"
+  err=1
+fi
+
+if [ -z "$AWS_REGION" ]; then
+  echo "error: AWS_REGION is not set"
+  err=1
+fi
+
+if [ $err -eq 1 ]; then
   exit 1
 fi
 
-# Default to us-east-1 if AWS_REGION not set.
-if [ -z "$AWS_REGION" ]; then
-  AWS_REGION="us-east-1"
-fi
+INVALIDATION_ID=$(AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" AWS_REGION="$AWS_REGION" aws cloudfront create-invalidation --distribution-id "$DISTRIBUTION_ID" --paths "$PATHS" $* | jq -r '.Invalidation.Id')
 
-# Create a dedicated profile for this action to avoid conflicts
-# with past/future actions.
-PROFILE_NAME=cloudfront-invalidate
+INVALIDATION_STATUS="InProgress"
 
-aws configure --profile ${PROFILE_NAME} <<-EOF > /dev/null 2>&1
-${AWS_ACCESS_KEY_ID}
-${AWS_SECRET_ACCESS_KEY}
-${AWS_REGION}
-text
-EOF
-
-if [ -n "$AWS_S3_FOLDER" ]; then
-    S3_URL=s3://${AWS_S3_BUCKET}/${AWS_S3_FOLDER}/${FILENAME_NO_PATH}
-else
-    S3_URL=s3://${AWS_S3_BUCKET}/${FILENAME_NO_PATH}
-fi
-
-# All other flags are optional via the `args:` directive.
-invalidation_id = $(aws cloudfront create-invalidation --distribution-id ${DISTRIBUTION_ID} \
-          --paths '${PATH_TO_INVALIDATE}' \
-          --profile ${PROFILE_NAME} $* \
-          --query Invalidation.Id)
-length=${#invalidation_id}
-sh -c "aws cloudfront wait invalidation-completed --distribution-id $DISTRIBUTION_ID --id ${invalidation_id:1:$length-2}"
-
-# Clear out credentials after we're done.
-# We need to re-run `aws configure` with bogus input instead of
-# deleting ~/.aws in case there are other credentials living there.
-aws configure --profile ${PROFILE_NAME} <<-EOF > /dev/null 2>&1
-null
-null
-null
-text
-EOF
+while [ $INVALIDATION_STATUS = "InProgress" ]
+do
+  sleep 10
+  INVALIDATION_STATUS=$(AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" AWS_REGION="$AWS_REGION" aws cloudfront get-invalidation --distribution-id "$DISTRIBUTION_ID" --id "$INVALIDATION_ID" | jq -r '.Invalidation.Status')
+done
